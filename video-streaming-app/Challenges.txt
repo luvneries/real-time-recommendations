@@ -1,0 +1,4 @@
+1. getMedia is not supported on Mac Chrome browser.
+
+2. Recorder API is not supported on Mac Safari browser.
+

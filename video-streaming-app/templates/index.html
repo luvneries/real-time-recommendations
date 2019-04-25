@@ -1,0 +1,260 @@
+<!doctype html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/web/thymeleaf/layout" layout:decorate="layout">
+    <head>
+        <meta charset="utf-8">
+        <title>Identify user and location</title>
+
+        <!-- ajax query to post data back to server -->
+        <script src="static/js/jquery-3.3.1.min.js"></script>
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+
+        <link rel="icon" href="static/images/deloitte_favicon.png">
+
+        <script src="static/js/opencv.js"></script>
+
+        <script src="https://docs.opencv.org/master/utils.js"></script>
+    </head>
+
+    <body>
+
+        <!--1. Get user location-->
+        <p>User Location (lat, lon):<br/>
+            <span id="Lat">???</span>°, <span id="Lon">???</span>°
+        </p>
+
+        <!--3. Include a video element that will display the current video stream.-->
+        <video id="my-video" controls autoplay="true" play width="300" height="225"></video>
+        <canvas id="canvasFrame" autoplay="true" width="300" height="225"></canvas>
+        <!-- 2. Include action buttons play/stop -->
+        <button id="btn-start-stream">Start streaming</button>
+        <button id="btn-stop-stream" disabled="disabled">Stop streaming</button>
+
+        <!--4. Include the RecordRTC library and the latest adapter.
+        Note that you may want to host these scripts in your own server.-->
+        <script src="https://cdn.webrtc-experiment.com/RecordRTC.js"></script>
+        <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+
+        <p>Recommendations:<br/>
+            <div id="result"></div>
+
+            <div class="container">
+            <table id="articlesTable" border="1" >
+                <thead>
+                    <tr>
+                    <th width="5%">ProductID</th>
+                    <th width="20%">Name</th>
+                    <th width="20%">Image</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            </div>
+        </p>
+
+        <script>
+                
+            // check for Geolocation support
+            if (navigator.geolocation) {
+            console.log('Geolocation is supported!');
+            }
+            else {
+            console.log('Geolocation is not supported for this Browser/OS version yet.');
+            }
+
+            window.onload = function() {
+            var userPos;
+            navigator.geolocation.getCurrentPosition(function(position) {
+                userPos = position;
+                document.getElementById('Lat').innerHTML = userPos.coords.latitude;
+                document.getElementById('Lon').innerHTML = userPos.coords.longitude;
+
+                // Post lat and lon to server and get recommendations
+                $.ajax({
+                    type: "POST",
+                    url: "/location",
+                    data: { lat : userPos.coords.latitude, lon: userPos.coords.latitude },
+                    dataType: "text",
+                    success: function(response) { console.log("Success", response);
+                        var obj = $.parseJSON(response);
+                        var len = obj.articles.length;
+                        for(var i=0; i<len; i++){
+                            var id = obj.articles[i];
+                            var name = "product"+(i+1);
+                            var tr_str = "<tr>" +
+                                "<td align='center'>" + (id) + "</td>" +
+                                "<td align='center'>" + name + "</td>" +
+                                "</tr>";
+                                
+                            $("#articlesTable tbody").append(tr_str);
+                        };
+                        },
+                    error: function( xhr, status, error) { console.log("error", error); }
+                 });
+            });
+            };
+        </script>
+
+        <!-- 5. Initialize and prepare the video recorder logic -->
+        <script>
+
+            //global reference to the recorder instance
+            var recorder;
+
+            function hasGetUserMedia() {
+                return !!(navigator.mediaDevices &&
+                    navigator.mediaDevices.getUserMedia);
+            }
+
+            if (hasGetUserMedia()) {
+                console.log('Good to go!');
+            } else {
+                alert('getUserMedia() is not supported by your browser');
+            }
+
+            // When the user clicks on start video recording
+            document.getElementById('btn-start-stream').addEventListener("click", function(){
+                // Disable start recording button
+                this.disabled = true;
+
+                // Request access to the media devices
+                navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: true
+                }).then(function(stream) {
+                    // Enable stop recording button
+                    document.getElementById('btn-stop-stream').disabled = false;
+                    
+                    // Store a reference of the preview video element
+                    let streaming = false;
+                    let video = document.getElementById('my-video');
+
+                    let canvasFrame = document.getElementById("canvasFrame"); // canvasFrame is the id of <canvas>
+                    let context = canvasFrame.getContext("2d");
+                    context.fillRect(0, 0, 300, 225);
+
+                    // Start to display the preview on the video element
+                    // and mute the video to disable the echo issue !
+                    video.srcObject = stream;
+                    video.play();
+                    video.muted = true;
+
+                    let src = new cv.Mat(video.height, video.width, cv.CV_8UC4);
+                    let dst = new cv.Mat(video.height, video.width, cv.CV_8UC4);
+                    let gray = new cv.Mat();
+                    let msize = new cv.Size(0,0);
+                    let cap = new cv.VideoCapture(video);
+                    streaming = true;
+                    let faces = new cv.RectVector();
+                    let classifier = new cv.CascadeClassifier();
+                    let utils = new Utils("errorMessage");
+
+                    // facing issue to load this and load in classifier to detect multiscale
+                    let faceCascadeFile = "../haar/haarcascade_frontalface_default.xml";
+
+                    // use createFileFromUrl to "pre-build" the xml
+                    //utils.createFileFromUrl(faceCascadeFile, faceCascadeFile, () => {
+                    classifier.load(faceCascadeFile); // in the callback, load the cascade from file 
+                    //});
+
+                    const FPS = 30;
+                    function processVideo() {
+                        try {
+                            if (!streaming) {
+                                // clean and stop.
+                                src.delete();
+                                dst.delete();
+                                gray.delete();
+                                faces.delete();
+                                classifier.delete();
+                                return;
+                            }
+
+                            let begin = Date.now();
+                            // start processing.
+                            cap.read(src);
+                            src.copyTo(dst);
+                            cv.cvtColor(dst, gray, cv.COLOR_RGBA2GRAY, 0);
+
+                            // Error - line 151
+                            //classifier.detectMultiScale(gray, faces, 1.1, 3, 0, msize, msize);
+                            
+                            // draw faces.
+                            for (let i = 0; i < faces.size(); ++i) {
+                                let face = faces.get(i);
+                                let point1 = new cv.Point(face.x, face.y);
+                                let point2 = new cv.Point(face.x + face.width, face.y + face.height);
+                                cv.rectangle(dst, point1, point2, [255, 0, 0, 255]);
+                            }
+                            cv.imshow("canvasFrame", dst);
+                            // schedule the next one.
+                            let delay = 1000/FPS - (Date.now() - begin);
+                            setTimeout(processVideo, delay);
+                        } catch (err) {
+                            console.log(err);
+                            utils.printError(err);
+                            
+                        }
+                    };
+
+                    // schedule the first one.
+                    setTimeout(processVideo, 0);
+
+                    // Initialize the recorder
+                    recorder = new RecordRTCPromisesHandler(stream, {
+                        mimeType: 'video/webm',
+                        bitsPerSecond: 128000
+                    });
+
+                    // release stream on stopRecording
+                    recorder.stream = stream;
+
+                    // Start recording the video
+                    recorder.startRecording().then(function() {
+                        console.info('Recording video ...');
+                    }).catch(function(error) {
+                        console.error('Cannot start video recording: ', error);
+                    });
+            }).catch(function(error) {
+                    console.error('Get Media device failure', error);
+            });
+
+            }, false);
+
+        </script>
+
+        <!-- 6. Stop video streaming -->
+        <script>
+            // When the user clicks on Stop video recording
+            document.getElementById('btn-stop-stream').addEventListener("click", function(){
+                // Disable stop recording button
+                this.disabled = true;
+
+                // stop streaming
+                recorder.stream.getTracks().forEach( (track) => {
+                track.stop();
+                });
+
+                // Enable record button again !
+                document.getElementById('btn-start-stream').disabled = false;
+
+                recorder.stopRecording().then(function() {
+                    console.info('stopRecording success');
+                }).catch(function(error) {
+                    console.error('stopRecording failure', error);
+                });
+
+                    // Retrieve recorded video as blob and display in the preview element
+                    //var videoBlob = recorder.getBlob();
+                    //video.src = URL.createObjectURL(videoBlob);
+
+                    //video.play();
+
+                    // Unmute video on preview
+                    //video.muted = false;
+
+            }, false);
+
+        </script>
+    </body>
+</html>
+
